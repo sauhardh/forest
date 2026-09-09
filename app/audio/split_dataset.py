@@ -1,9 +1,20 @@
+import sys
+from pathlib import Path
 from typing import cast
+
+# Ensure 'app' directory is in sys.path
+_current = Path(__file__).resolve()
+for _p in [_current.parent, _current.parent.parent, _current.parent.parent.parent]:
+    if _p.name == "app" and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+    elif (_p / "app").is_dir() and str(_p / "app") not in sys.path:
+        sys.path.insert(0, str(_p / "app"))
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from audio import INPUT_PATH, SPLIT_DIR
+
 
 RANDOM_STATE = 42
 

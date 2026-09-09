@@ -10,7 +10,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from audio import SAMPLE_RATE
+from audio import SAMPLE_RATE, BASE_OUTPUT_DIR
 from audio.model import NUM_CLASSES
 
 from audio.features.mel_transform import MelTransform
@@ -20,7 +20,7 @@ from audio.features.augment import AcousticMixup, SpecAugment
 class BirdDataset:
     def __init__(
         self,
-        clips_csv: Path,
+        clips_csv: Path | str,
         split: str,
         use_pcen: bool = True,
         n_mels: int = 128,
@@ -31,7 +31,17 @@ class BirdDataset:
         self.augment = augment
         self.bg_injector = bg_injector
 
-        df = pd.read_csv(clips_csv)
+        # Auto-resolve clips_csv path if needed
+        csv_p = Path(clips_csv)
+        if not csv_p.exists():
+            if (BASE_OUTPUT_DIR / csv_p).exists():
+                csv_p = BASE_OUTPUT_DIR / csv_p
+            elif (BASE_OUTPUT_DIR / "extraction" / csv_p.name).exists():
+                csv_p = BASE_OUTPUT_DIR / "extraction" / csv_p.name
+            elif (BASE_OUTPUT_DIR.parent / csv_p).exists():
+                csv_p = BASE_OUTPUT_DIR.parent / csv_p
+
+        df = pd.read_csv(csv_p)
         self.df = df[df["split"] == split].reset_index(drop=True)
 
         # -- Build species
@@ -63,8 +73,50 @@ class BirdDataset:
             else None
         )
 
+    def _resolve_clip_path(self, clip_path: str | Path) -> Path:
+        p = Path(clip_path)
+        if p.exists():
+            return p
+
+        path_str = str(clip_path).replace("\\", "/")
+        # Check if path contains extraction/clips
+        if "extraction/clips" in path_str:
+            sub = path_str[path_str.index("extraction/clips"):]
+            candidate = BASE_OUTPUT_DIR / sub
+            if candidate.exists():
+                return candidate
+            if (BASE_OUTPUT_DIR.parent / sub).exists():
+                return BASE_OUTPUT_DIR.parent / sub
+
+        # If clip_path starts with "outputs/"
+        if path_str.startswith("outputs/"):
+            rel_sub = path_str[len("outputs/"):]
+            candidate = BASE_OUTPUT_DIR / rel_sub
+            if candidate.exists():
+                return candidate
+
+        # Check directly under BASE_OUTPUT_DIR
+        candidate = BASE_OUTPUT_DIR / p
+        if candidate.exists():
+            return candidate
+
+        candidate = BASE_OUTPUT_DIR.parent / p
+        if candidate.exists():
+            return candidate
+
+        return p
+
     def _load_waveform(self, clip_path: str) -> np.ndarray:
-        audio, _ = sf.read(clip_path, dtype="float32")
+        resolved_path = self._resolve_clip_path(clip_path)
+        if not resolved_path.exists():
+            raise FileNotFoundError(
+                f"Audio clip not found: {clip_path}\n"
+                f"Resolved candidate attempted: {resolved_path}\n"
+                f"BASE_OUTPUT_DIR is currently set to: {BASE_OUTPUT_DIR}\n"
+                "Tip: Set the FOREST_OUTPUT_DIR environment variable to your data directory, "
+                "or mount Google Drive if running in Google Colab."
+            )
+        audio, _ = sf.read(resolved_path, dtype="float32")
         target = 3 * SAMPLE_RATE
 
         if len(audio) < target:
@@ -73,6 +125,7 @@ class BirdDataset:
             audio = audio[:target]
 
         return audio
+
 
     def __len__(self) -> int:
         return len(self.df)

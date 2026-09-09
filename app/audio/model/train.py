@@ -1,4 +1,14 @@
 from pathlib import Path
+import sys
+
+# Ensure 'app' directory is in sys.path
+_current = Path(__file__).resolve()
+for _p in [_current.parent, _current.parent.parent, _current.parent.parent.parent]:
+    if _p.name == "app" and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+    elif (_p / "app").is_dir() and str(_p / "app") not in sys.path:
+        sys.path.insert(0, str(_p / "app"))
+
 import time
 import torch
 import torch.nn as nn
@@ -6,16 +16,18 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 
+
 try:
     from audio.model.dataset import make_dataloaders
     from audio.model.backbone import build_model
     from audio.model.loss import build_loss
-    from audio import CLIPS_METADATA_PATH
+    from audio import CLIPS_METADATA_PATH, CHECKPOINTS_DIR
 except ImportError:
     from model.dataset import make_dataloaders
     from model.backbone import build_model
     from model.loss import build_loss
-    from audio import CLIPS_METADATA_PATH
+    from audio import CLIPS_METADATA_PATH, CHECKPOINTS_DIR
+
 
 
 def compute_metrics(logits: torch.Tensor, targets: torch.Tensor) -> dict[str, float]:
@@ -92,27 +104,54 @@ def validate(model, loader, criterion, device) -> tuple[float, float, float]:
     return total_loss / n, total_top1 / n, total_top5 / n
 
 
-def main():
+def parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="Train Bird Sound Classifier")
+    parser.add_argument("--epochs", type=int, default=25, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, default=16, help="Batch size")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
+    parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay")
+    parser.add_argument("--backbone", type=str, default="efficientnet_v2_s", help="Backbone model")
+    parser.add_argument("--clips-csv", type=str, default=None, help="Path to clips_metadata.csv")
+    parser.add_argument("--save-dir", type=str, default=None, help="Checkpoint save directory")
+    parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers")
+    parser.add_argument("--no-mixup", action="store_true", help="Disable acoustic mixup")
+    return parser
+
+
+def main(args=None):
+    if args is None:
+        parser = parse_args()
+        # Parse known args so calling in environments like notebooks won't fail
+        args, _ = parser.parse_known_args()
+
     # ── Config ─────────────────────────────────────────────────────────────
-    BATCH_SIZE = 16  # 16 fits safely inside 4GB VRAM
-    NUM_WORKERS = 4  # Optimal for Ryzen 5
-    EPOCHS = 25
-    LR = 5e-4
-    WEIGHT_DECAY = 1e-4
-    BACKBONE = "efficientnet_v2_s"
-    SAVE_DIR = Path("outputs/checkpoints")
+    BATCH_SIZE = args.batch_size
+    NUM_WORKERS = args.num_workers if args.num_workers is not None else min(4, (import_os := __import__('os')).cpu_count() or 2)
+    EPOCHS = args.epochs
+    LR = args.lr
+    WEIGHT_DECAY = args.weight_decay
+    BACKBONE = args.backbone
+    USE_MIXUP = not args.no_mixup
+    SAVE_DIR = Path(args.save_dir) if args.save_dir else CHECKPOINTS_DIR
+    CLIPS_CSV = Path(args.clips_csv) if args.clips_csv else CLIPS_METADATA_PATH
+
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(
         f"Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})"
     )
+    print(f"Checkpoints will be saved to: {SAVE_DIR.resolve()}")
+    print(f"Clips metadata source: {CLIPS_CSV}")
+    print(f"Workers: {NUM_WORKERS} | Batch size: {BATCH_SIZE} | Mixup: {USE_MIXUP}")
+
     # ── DataLoaders ────────────────────────────────────────────────────────
     print("Loading datasets...")
     loaders = make_dataloaders(
-        clips_csv=CLIPS_METADATA_PATH,
+        clips_csv=CLIPS_CSV,
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
-        use_mixup=True,
+        use_mixup=USE_MIXUP,
     )
 
     from audio.model.dataset import BirdDataset
@@ -125,9 +164,6 @@ def main():
     class_counts = train_dataset.class_counts
     print(f"Species classes: {num_classes}")
 
-    # num_classes = loaders["train"].dataset.num_classes
-    # class_counts = loaders["train"].dataset.class_counts
-    print(f"Species classes: {num_classes}")
     # ── Model, Loss, Optimizer ─────────────────────────────────────────────
     model = build_model(name=BACKBONE, num_classes=num_classes).to(device)
     criterion = build_loss(loss_type="bce", class_counts=class_counts).to(device)

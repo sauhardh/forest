@@ -1,6 +1,18 @@
+import sys
+from pathlib import Path
+
+# Ensure 'app' directory is in sys.path
+_current = Path(__file__).resolve()
+for _p in [_current.parent, _current.parent.parent, _current.parent.parent.parent]:
+    if _p.name == "app" and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+    elif (_p / "app").is_dir() and str(_p / "app") not in sys.path:
+        sys.path.insert(0, str(_p / "app"))
+
 import pandas as pd
 
 from audio import METADATA_PATH, OUTPUT_PATH
+
 
 MIN_SECONDS = 3
 
