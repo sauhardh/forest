@@ -42,7 +42,13 @@ def get_base_output_dir() -> Path:
     if "FOREST_OUTPUT_DIR" in os.environ:
         p = Path(os.environ["FOREST_OUTPUT_DIR"]).resolve()
         p.mkdir(parents=True, exist_ok=True)
+        # If the user unpacked a zip that created a nested outputs/ directory
+        if (p / "outputs" / "extraction").exists() and not (p / "extraction").exists():
+            return (p / "outputs").resolve()
+        if (p / "outputs" / "splits").exists() and not (p / "splits").exists():
+            return (p / "outputs").resolve()
         return p
+
 
     cwd_outputs = Path.cwd() / "outputs"
     if cwd_outputs.exists():
