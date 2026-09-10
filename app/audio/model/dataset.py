@@ -226,9 +226,12 @@ def make_dataloaders(
             batch_size=batch_size,
             shuffle=is_train,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=torch.cuda.is_available(),
+            persistent_workers=(num_workers > 0),
+            prefetch_factor=2 if num_workers > 0 else None,
             collate_fn=collate_fn,
             drop_last=is_train,  # keep batch size uniform during training
         )
 
     return loaders
+

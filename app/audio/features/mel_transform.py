@@ -20,6 +20,9 @@ import librosa
 from audio import SAMPLE_RATE
 
 
+from scipy.signal import lfilter
+
+
 N_FFT = 2048
 HOP_LENGTH = 512
 N_MELS = 128  # change to 224 for ViT-style patch grids
@@ -47,6 +50,10 @@ class MelTransform:
             fmin=F_MIN,
             fmax=F_MAX,
         )
+        # Pre-compile IIR filter coefficients for fast PCEN smoothing
+        self._b = np.array([PCEN_S], dtype=np.float32)
+        self._a = np.array([1.0, -(1.0 - PCEN_S)], dtype=np.float32)
+        self._zi = np.zeros((self.n_mels, 1), dtype=np.float32)
 
     def _power_mel(self, waveform: np.ndarray) -> np.ndarray:
         """Return linear-scale Mel power spectrogram  (n_mels × T)."""
@@ -70,17 +77,14 @@ class MelTransform:
 
     def pcen(self, waveform: np.ndarray) -> np.ndarray:
         E = self._power_mel(waveform)  # (n_mels, T)
-        n_mels, T = E.shape
-        # ── Step 1: IIR low-pass smoother  →  M(t, f) ──────────────────
-        M = np.zeros_like(E)
-        M[:, 0] = PCEN_S * E[:, 0]
-        for t in range(1, T):
-            M[:, t] = (1.0 - PCEN_S) * M[:, t - 1] + PCEN_S * E[:, t]
+        # ── Step 1: IIR low-pass smoother via compiled C-level lfilter ──
+        M, _ = lfilter(self._b, self._a, E, axis=-1, zi=self._zi)
         # ── Step 2: Per-channel AGC divisor  (ε + M)^α ─────────────────
         agc_denom = (PCEN_EPS + M) ** PCEN_ALPHA  # (n_mels, T)
         # ── Step 3: Stable root compression ────────────────────────────
         pcen_out = (E / agc_denom + PCEN_DELTA) ** PCEN_R - PCEN_DELTA**PCEN_R
         return pcen_out.astype(np.float32)
+
 
     def __call__(self, waveform: np.ndarray) -> np.ndarray:
         if self.use_pcen:

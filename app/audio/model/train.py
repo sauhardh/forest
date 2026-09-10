@@ -127,7 +127,7 @@ def main(args=None):
 
     # ── Config ─────────────────────────────────────────────────────────────
     BATCH_SIZE = args.batch_size
-    NUM_WORKERS = args.num_workers if args.num_workers is not None else min(4, (import_os := __import__('os')).cpu_count() or 2)
+    NUM_WORKERS = args.num_workers if args.num_workers is not None else min(2, (import_os := __import__('os')).cpu_count() or 2)
     EPOCHS = args.epochs
     LR = args.lr
     WEIGHT_DECAY = args.weight_decay
@@ -138,12 +138,16 @@ def main(args=None):
 
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+
     print(
         f"Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})"
     )
     print(f"Checkpoints will be saved to: {SAVE_DIR.resolve()}")
     print(f"Clips metadata source: {CLIPS_CSV}")
     print(f"Workers: {NUM_WORKERS} | Batch size: {BATCH_SIZE} | Mixup: {USE_MIXUP}")
+
 
     # ── DataLoaders ────────────────────────────────────────────────────────
     print("Loading datasets...")
