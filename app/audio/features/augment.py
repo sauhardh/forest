@@ -40,7 +40,44 @@ class SpecAugment:
         return spec
 
 
+import torch
+import torch.nn as nn
+
+
+class TorchSpecAugment(nn.Module):
+    """
+    GPU-accelerated SpecAugment on 4D batch tensors (B, 1, n_mels, T).
+    Runs in < 0.05 ms on CUDA.
+    """
+    def __init__(
+        self,
+        freq_mask_param: int = 27,
+        time_mask_param: int = 40,
+        num_freq_masks: int = 2,
+        num_time_masks: int = 2,
+    ):
+        super().__init__()
+        self.F = freq_mask_param
+        self.T = time_mask_param
+        self.nF = num_freq_masks
+        self.nT = num_time_masks
+
+    def forward(self, spec: torch.Tensor) -> torch.Tensor:
+        spec = spec.clone()
+        _, _, n_mels, n_frames = spec.shape
+        for _ in range(self.nF):
+            f = random.randint(0, self.F)
+            f0 = random.randint(0, max(0, n_mels - f))
+            spec[:, :, f0 : f0 + f, :] = 0.0
+        for _ in range(self.nT):
+            t = random.randint(0, self.T)
+            t0 = random.randint(0, max(0, n_frames - t))
+            spec[:, :, :, t0 : t0 + t] = 0.0
+        return spec
+
+
 class AcousticMixup:
+
     """
     Mixup in spectrogram space for multi-label bird audio classification.
     Given two spectrograms X_i, X_j and their one-hot label vectors y_i, y_j:

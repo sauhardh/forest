@@ -48,7 +48,7 @@ def compute_metrics(logits: torch.Tensor, targets: torch.Tensor) -> dict[str, fl
 
 
 def train_epoch(
-    model, loader, criterion, optimizer, scaler, device
+    model, loader, criterion, optimizer, scaler, device, mel_transform=None, spec_augment=None
 ) -> tuple[float, float, float]:
     model.train()
     total_loss = 0.0
@@ -57,8 +57,16 @@ def train_epoch(
     num_batches = len(loader)
 
     for i, batch in enumerate(loader):
-        specs = batch["spectrogram"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
+        if "waveform" in batch and mel_transform is not None:
+            waves = batch["waveform"].to(device, non_blocking=True)
+            with torch.no_grad():
+                specs = mel_transform(waves)
+                if spec_augment is not None:
+                    specs = spec_augment(specs)
+        else:
+            specs = batch["spectrogram"].to(device, non_blocking=True)
+
         optimizer.zero_grad()
 
         with torch.amp.autocast(device_type="cuda", enabled=device.type == "cuda"):
@@ -70,9 +78,9 @@ def train_epoch(
         scaler.update()
 
         metrics = compute_metrics(logits, labels)
-        total_loss += loss.item() * len(specs)
-        total_top1 += metrics["top1_acc"] * len(specs)
-        total_top5 += metrics["top5_acc"] * len(specs)
+        total_loss += loss.item() * len(labels)
+        total_top1 += metrics["top1_acc"] * len(labels)
+        total_top5 += metrics["top5_acc"] * len(labels)
 
         # ── Print live progress every 50 batches ──
         if (i + 1) % 50 == 0 or (i + 1) == num_batches:
@@ -84,22 +92,27 @@ def train_epoch(
     return total_loss / n, total_top1 / n, total_top5 / n
 
 
-def validate(model, loader, criterion, device) -> tuple[float, float, float]:
+def validate(model, loader, criterion, device, mel_transform=None) -> tuple[float, float, float]:
     model.eval()
     total_loss = 0.0
     total_top1 = 0.0
     total_top5 = 0.0
     with torch.no_grad():
         for batch in loader:
-            specs = batch["spectrogram"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
+            if "waveform" in batch and mel_transform is not None:
+                waves = batch["waveform"].to(device, non_blocking=True)
+                specs = mel_transform(waves)
+            else:
+                specs = batch["spectrogram"].to(device, non_blocking=True)
+
             with torch.amp.autocast(device_type="cuda", enabled=device.type == "cuda"):
                 logits = model(specs)
                 loss = criterion(logits, labels)
             metrics = compute_metrics(logits, labels)
-            total_loss += loss.item() * len(specs)
-            total_top1 += metrics["top1_acc"] * len(specs)
-            total_top5 += metrics["top5_acc"] * len(specs)
+            total_loss += loss.item() * len(labels)
+            total_top1 += metrics["top1_acc"] * len(labels)
+            total_top5 += metrics["top5_acc"] * len(labels)
     n = len(loader.dataset)
     return total_loss / n, total_top1 / n, total_top5 / n
 
@@ -116,6 +129,7 @@ def parse_args():
     parser.add_argument("--save-dir", type=str, default=None, help="Checkpoint save directory")
     parser.add_argument("--num-workers", type=int, default=None, help="DataLoader workers")
     parser.add_argument("--no-mixup", action="store_true", help="Disable acoustic mixup")
+    parser.add_argument("--cpu-features", action="store_true", help="Force feature transforms to run on CPU")
     return parser
 
 
@@ -127,7 +141,7 @@ def main(args=None):
 
     # ── Config ─────────────────────────────────────────────────────────────
     BATCH_SIZE = args.batch_size
-    NUM_WORKERS = args.num_workers if args.num_workers is not None else min(2, (import_os := __import__('os')).cpu_count() or 2)
+    NUM_WORKERS = args.num_workers if args.num_workers is not None else min(4, (import_os := __import__('os')).cpu_count() or 2)
     EPOCHS = args.epochs
     LR = args.lr
     WEIGHT_DECAY = args.weight_decay
@@ -141,13 +155,25 @@ def main(args=None):
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
+    # ── Feature Acceleration (GPU vs CPU) ──────────────────────────────────
+    use_gpu_features = (device.type == "cuda") and (not getattr(args, "cpu_features", False))
+    if use_gpu_features:
+        from audio.features.mel_transform import TorchMelTransform
+        from audio.features.augment import TorchSpecAugment
+        mel_transform = TorchMelTransform(use_pcen=True).to(device)
+        train_spec_augment = TorchSpecAugment().to(device)
+        print("⚡ GPU Feature Acceleration: ENABLED (Spectrograms & PCEN computed on GPU)")
+    else:
+        mel_transform = None
+        train_spec_augment = None
+        print("Feature transforms: Running on CPU")
+
     print(
         f"Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})"
     )
     print(f"Checkpoints will be saved to: {SAVE_DIR.resolve()}")
     print(f"Clips metadata source: {CLIPS_CSV}")
     print(f"Workers: {NUM_WORKERS} | Batch size: {BATCH_SIZE} | Mixup: {USE_MIXUP}")
-
 
     # ── DataLoaders ────────────────────────────────────────────────────────
     print("Loading datasets...")
@@ -156,7 +182,9 @@ def main(args=None):
         batch_size=BATCH_SIZE,
         num_workers=NUM_WORKERS,
         use_mixup=USE_MIXUP,
+        return_waveform=use_gpu_features,
     )
+
 
     from audio.model.dataset import BirdDataset
 
@@ -180,10 +208,21 @@ def main(args=None):
         print("epochs:", epoch)
         t0 = time.time()
         train_loss, train_top1, _ = train_epoch(
-            model, loaders["train"], criterion, optimizer, scaler, device
+            model,
+            loaders["train"],
+            criterion,
+            optimizer,
+            scaler,
+            device,
+            mel_transform=mel_transform,
+            spec_augment=train_spec_augment,
         )
         val_loss, val_top1, val_top5 = validate(
-            model, loaders["val"], criterion, device
+            model,
+            loaders["val"],
+            criterion,
+            device,
+            mel_transform=mel_transform,
         )
         scheduler.step()
         elapsed = time.time() - t0

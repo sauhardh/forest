@@ -25,10 +25,12 @@ class BirdDataset:
         use_pcen: bool = True,
         n_mels: int = 128,
         augment: bool = False,
+        return_waveform: bool = False,
         bg_injector=None,
     ):
         self.split = split
         self.augment = augment
+        self.return_waveform = return_waveform
         self.bg_injector = bg_injector
 
         # Auto-resolve clips_csv path if needed
@@ -60,7 +62,7 @@ class BirdDataset:
             idx = self.species_to_idx[species]
             self.class_counts[idx] = len(grp)
 
-        ## __FEATURE TRANSFORM__
+        ## __FEATURE TRANSFORM__ (Only used if return_waveform is False)
         self.transform = MelTransform(n_mels=n_mels, use_pcen=use_pcen)
         self.spec_augment = (
             SpecAugment(
@@ -126,13 +128,20 @@ class BirdDataset:
 
         return audio
 
-
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
         waveform = self._load_waveform(row["clip_path"])
+        label = self.species_to_idx[row["species"]]
+
+        # Fast path: Return raw waveform directly for GPU feature processing
+        if self.return_waveform:
+            return {
+                "waveform": torch.from_numpy(waveform),
+                "label": torch.tensor(label, dtype=torch.long),
+            }
 
         # Background noise injection
         if self.bg_injector is not None and self.augment:
@@ -140,11 +149,10 @@ class BirdDataset:
         else:
             spec = self.transform(waveform)  # (n_mels, T)
 
-        # Spectogram
+        # Spectrogram
         if self.spec_augment is not None:
             spec = self.spec_augment(spec)
 
-        label = self.species_to_idx[row["species"]]
         return {
             "spectrogram": torch.from_numpy(spec).unsqueeze(0),  # (1, n_mels, T)
             "label": torch.tensor(label, dtype=torch.long),
@@ -155,49 +163,53 @@ class MixupCollator:
     def __init__(
         self, num_classes: int = NUM_CLASSES, alpha: float = 0.4, p: float = 0.5
     ):
-        self.mixup = AcousticMixup(alpha=alpha, num_classes=num_classes)
         self.num_classes = num_classes
         self.alpha = alpha
         self.p = p  # Probability of applying mixup (e.g. 50% of batches or samples)
 
     def __call__(self, batch: list[dict]) -> dict:
-        specs = torch.stack([b["spectrogram"] for b in batch])  # (B, 1, M, T)
-        labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)  # (B,)
+        labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
 
         one_hot = torch.zeros(len(batch), self.num_classes, dtype=torch.float32)
         one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
 
+        is_waveform = "waveform" in batch[0]
+        data_key = "waveform" if is_waveform else "spectrogram"
+        data = torch.stack([b[data_key] for b in batch])
+
         if np.random.rand() > self.p:
             return {
-                "spectrogram": specs,
+                data_key: data,
                 "label": one_hot,
             }
 
         perm = torch.randperm(len(batch))
-        lam = np.random.beta(self.alpha, self.alpha)
+        lam = float(np.random.beta(self.alpha, self.alpha))
 
-        mixed_specs = lam * specs + (1.0 - lam) * specs[perm]
+        mixed_data = lam * data + (1.0 - lam) * data[perm]
         mixed_labels = lam * one_hot + (1.0 - lam) * one_hot[perm]
 
         return {
-            "spectrogram": mixed_specs,
+            data_key: mixed_data,
             "label": mixed_labels,
         }
 
 
+
 def make_dataloaders(
-    clips_csv: Path,
+    clips_csv: Path | str,
     use_pcen: bool = True,
     n_mels: int = 128,
     batch_size: int = 32,
     num_workers: int = 4,
     use_mixup: bool = True,
+    return_waveform: bool = True,
     bg_injector=None,
 ) -> dict[str, DataLoader]:
     """
     Returns:
         {
-          "train": DataLoader  (with SpecAugment + Mixup + BG injection),
+          "train": DataLoader  (with Mixup + optional GPU feature pipeline),
           "val":   DataLoader  (clean),
           "test":  DataLoader  (clean),
         }
@@ -212,8 +224,10 @@ def make_dataloaders(
             use_pcen=use_pcen,
             n_mels=n_mels,
             augment=is_train,
+            return_waveform=return_waveform,
             bg_injector=bg_injector if is_train else None,
         )
+
 
         collate_fn = (
             MixupCollator(num_classes=dataset.num_classes)
