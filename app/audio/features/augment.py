@@ -10,8 +10,8 @@ from audio.features.mel_transform import MelTransform, N_FFT, HOP_LENGTH
 class SpecAugment:
     def __init__(
         self,
-        freq_mask_param: int = 27,
-        time_mask_param: int = 40,
+        freq_mask_param: int = 36,
+        time_mask_param: int = 64,
         num_freq_masks: int = 2,
         num_time_masks: int = 2,
     ):
@@ -51,8 +51,8 @@ class TorchSpecAugment(nn.Module):
     """
     def __init__(
         self,
-        freq_mask_param: int = 27,
-        time_mask_param: int = 40,
+        freq_mask_param: int = 36,
+        time_mask_param: int = 64,
         num_freq_masks: int = 2,
         num_time_masks: int = 2,
     ):
@@ -227,8 +227,8 @@ def build_augmentation_pipeline(
     pipeline: dict = {
         "transform": MelTransform(n_mels=n_mels, use_pcen=use_pcen),
         "spec_augment": SpecAugment(
-            freq_mask_param=27,
-            time_mask_param=40,
+            freq_mask_param=36,
+            time_mask_param=64,
             num_freq_masks=2,
             num_time_masks=2,
         ),

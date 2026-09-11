@@ -66,8 +66,8 @@ class BirdDataset:
         self.transform = MelTransform(n_mels=n_mels, use_pcen=use_pcen)
         self.spec_augment = (
             SpecAugment(
-                freq_mask_param=27,
-                time_mask_param=40,
+                freq_mask_param=36,
+                time_mask_param=64,
                 num_freq_masks=2,
                 num_time_masks=2,
             )
@@ -83,7 +83,7 @@ class BirdDataset:
         path_str = str(clip_path).replace("\\", "/")
         # Check if path contains extraction/clips
         if "extraction/clips" in path_str:
-            sub = path_str[path_str.index("extraction/clips"):]
+            sub = path_str[path_str.index("extraction/clips") :]
             candidate = BASE_OUTPUT_DIR / sub
             if candidate.exists():
                 return candidate
@@ -92,7 +92,7 @@ class BirdDataset:
 
         # If clip_path starts with "outputs/"
         if path_str.startswith("outputs/"):
-            rel_sub = path_str[len("outputs/"):]
+            rel_sub = path_str[len("outputs/") :]
             candidate = BASE_OUTPUT_DIR / rel_sub
             if candidate.exists():
                 return candidate
@@ -141,6 +141,7 @@ class BirdDataset:
             return {
                 "waveform": torch.from_numpy(waveform),
                 "label": torch.tensor(label, dtype=torch.long),
+                "recording_id": str(row.get("recording_id", idx)),
             }
 
         # Background noise injection
@@ -156,6 +157,7 @@ class BirdDataset:
         return {
             "spectrogram": torch.from_numpy(spec).unsqueeze(0),  # (1, n_mels, T)
             "label": torch.tensor(label, dtype=torch.long),
+            "recording_id": str(row.get("recording_id", idx)),
         }
 
 
@@ -195,7 +197,6 @@ class MixupCollator:
         }
 
 
-
 def make_dataloaders(
     clips_csv: Path | str,
     use_pcen: bool = True,
@@ -228,7 +229,6 @@ def make_dataloaders(
             bg_injector=bg_injector if is_train else None,
         )
 
-
         collate_fn = (
             MixupCollator(num_classes=dataset.num_classes)
             if (is_train and use_mixup)
@@ -248,4 +248,3 @@ def make_dataloaders(
         )
 
     return loaders
-
