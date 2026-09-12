@@ -16,7 +16,7 @@ dependencies = [
     "soundfile>=0.12.0",
     "torch>=2.0.0",
     "torchvision>=0.15.0",
-    "transformers>=4.30.0",
+    "transformers>=4.44.0",
 ]
 
 [build-system]

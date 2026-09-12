@@ -104,6 +104,7 @@ def predict_audio(
     audio_path: Path | str,
     checkpoint_path: Path | str = CHECKPOINTS_DIR / "best_model.pt",
     clips_csv: Path | str = CLIPS_METADATA_PATH,
+    backbone: str = "efficientnet_v2_s",
     top_k: int = 5,
     hop_sec: float = 1.5,
     device: str | torch.device | None = None,
@@ -140,8 +141,11 @@ def predict_audio(
     model_num_classes = checkpoint.get("num_classes", num_classes)
     saved_epoch = checkpoint.get("epoch", "unknown")
 
-    model = build_model(num_classes=model_num_classes).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model = build_model(name=backbone, num_classes=model_num_classes).to(device)
+    # Migrate checkpoint keys if saved with an older version of transformers.
+    from audio.model.backbone import ASTAudio
+    sd = ASTAudio.migrate_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(sd)
     model.eval()
 
     # Transforms
@@ -220,6 +224,7 @@ def main():
     parser = argparse.ArgumentParser(description="Classify any bird sound audio recording")
     parser.add_argument("--audio", type=str, required=True, help="Path to audio file (WAV, MP3, etc.)")
     parser.add_argument("--checkpoint", type=str, default=str(CHECKPOINTS_DIR / "best_model.pt"), help="Path to checkpoint")
+    parser.add_argument("--backbone", type=str, default="efficientnet_v2_s", help="Model backbone used for training (e.g., ast)")
     parser.add_argument("--clips-csv", type=str, default=str(CLIPS_METADATA_PATH), help="Clips metadata for species indexing")
     parser.add_argument("--top-k", type=int, default=5, help="Number of top predictions to display")
     parser.add_argument("--hop-sec", type=float, default=1.5, help="Stride between analysis windows in seconds")
@@ -230,6 +235,7 @@ def main():
         audio_path=args.audio,
         checkpoint_path=args.checkpoint,
         clips_csv=args.clips_csv,
+        backbone=args.backbone,
         top_k=args.top_k,
         hop_sec=args.hop_sec,
         show_timeline=not args.no_timeline,

@@ -121,6 +121,52 @@ class ExtractClips:
         return rows
 
 
+MAX_CLIPS_PER_SPECIES = 200  # cap per species — keeps total dataset ~8-9 GB for Kaggle
+
+
+def cap_clips(df: pd.DataFrame, max_clips: int, rng_seed: int = 42) -> pd.DataFrame:
+    """Cap total clips per species to ``max_clips``, sampling proportionally
+    across recordings so no single long recording dominates.
+
+    Strategy: within each species, sample clips proportionally from each
+    recording (i.e. a recording that produced 200 clips contributes more
+    than one that produced 20, but neither dominates absolutely).
+    The same proportional sampling is applied per split so the train/val/test
+    ratio for each species is preserved.
+    """
+    rng = np.random.default_rng(rng_seed)
+    kept_parts = []
+
+    for species, sp_df in df.groupby("species"):
+        if len(sp_df) <= max_clips:
+            kept_parts.append(sp_df)
+            continue
+
+        # Sample proportionally per recording within each split.
+        sampled_parts = []
+        for split, split_df in sp_df.groupby("split"):
+            n_keep = max(1, round(max_clips * len(split_df) / len(sp_df)))
+            if len(split_df) <= n_keep:
+                sampled_parts.append(split_df)
+            else:
+                # Proportional within each recording inside this split.
+                rec_parts = []
+                for _, rec_df in split_df.groupby("recording_id"):
+                    n_rec = max(1, round(n_keep * len(rec_df) / len(split_df)))
+                    idx = rng.choice(len(rec_df), size=min(n_rec, len(rec_df)), replace=False)
+                    rec_parts.append(rec_df.iloc[sorted(idx)])
+                sampled = pd.concat(rec_parts)
+                # Trim to exactly n_keep if slight over/under-sampling occurred.
+                if len(sampled) > n_keep:
+                    idx = rng.choice(len(sampled), size=n_keep, replace=False)
+                    sampled = sampled.iloc[sorted(idx)]
+                sampled_parts.append(sampled)
+
+        kept_parts.append(pd.concat(sampled_parts))
+
+    return pd.concat(kept_parts).reset_index(drop=True)
+
+
 def main() -> None:
     detector = BirdActivityDetector()
     extractor = ExtractClips()
@@ -152,9 +198,20 @@ def main() -> None:
             print(f"  {rid} → {len(rows)} clips")
 
     df = pd.DataFrame(all_rows)
+
+    # ── Cap clips per species ────────────────────────────────────────────────
+    before = len(df)
+    df = cap_clips(df, max_clips=MAX_CLIPS_PER_SPECIES)
+    after = len(df)
+    print(f"\nClip cap ({MAX_CLIPS_PER_SPECIES}/species): {before} → {after} clips")
+
+    # ── Summary ─────────────────────────────────────────────────────────────
+    counts = df.groupby("species").size()
+    print(f"Clips per species — min: {counts.min()}, median: {counts.median():.0f}, max: {counts.max()}")
+
     CLIPS_METADATA_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(CLIPS_METADATA_PATH, index=False)
-    print(f"\nTotal clips: {len(df)}  →  {CLIPS_METADATA_PATH}")
+    print(f"Total clips: {len(df)}  →  {CLIPS_METADATA_PATH}")
 
 
 if __name__ == "__main__":

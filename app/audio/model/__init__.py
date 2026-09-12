@@ -8,5 +8,5 @@ Components:
   train.py    – Training loop, validation, checkpointing
 """
 
-NUM_CLASSES = 304
+NUM_CLASSES = 292
 ECO_DIM = 4  # [lat, lon, elevation, ndvi]

@@ -83,7 +83,10 @@ def evaluate_model(
 
     # ── Model & Criterion ──────────────────────────────────────────────────
     model = build_model(name=backbone, num_classes=num_classes).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # Migrate checkpoint keys if saved with an older version of transformers.
+    from audio.model.backbone import ASTAudio
+    sd = ASTAudio.migrate_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(sd)
     model.eval()
 
     criterion = build_loss(loss_type="bce").to(device)

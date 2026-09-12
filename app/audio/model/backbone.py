@@ -128,6 +128,49 @@ class ASTAudio(nn.Module):
     # Mismatching this causes a position-embedding shape error at runtime.
     TARGET_TIME_FRAMES = 1024
 
+    @staticmethod
+    def migrate_state_dict(state_dict: dict) -> dict:
+        """Remap checkpoint keys saved with old transformers (<4.36) to new names.
+
+        transformers ≥4.36 renamed the AST encoder internals:
+          OLD: audio_spectrogram_transformer.encoder.layer.N.attention.attention.query
+          NEW: audio_spectrogram_transformer.layers.N.attention.q_proj
+
+        This is a no-op if the checkpoint already uses the new naming scheme.
+        """
+        import re
+
+        # Detect whether this checkpoint uses the old naming scheme.
+        # Old checkpoints have 'encoder.layer' inside the AST path.
+        uses_old_scheme = any(
+            "audio_spectrogram_transformer.encoder.layer" in k
+            for k in state_dict
+        )
+        if not uses_old_scheme:
+            return state_dict  # Nothing to do.
+
+        renames = {
+            # Structural
+            "audio_spectrogram_transformer.encoder.layer": "audio_spectrogram_transformer.layers",
+            # Attention projections
+            ".attention.attention.query": ".attention.q_proj",
+            ".attention.attention.key":   ".attention.k_proj",
+            ".attention.attention.value": ".attention.v_proj",
+            ".attention.output.dense":    ".attention.o_proj",
+            # FFN layers
+            ".intermediate.dense": ".mlp.fc1",
+            ".output.dense":       ".mlp.fc2",
+        }
+
+        new_dict = {}
+        for k, v in state_dict.items():
+            new_k = k
+            for old, new in renames.items():
+                new_k = new_k.replace(old, new)
+            new_dict[new_k] = v
+
+        return new_dict
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (batch, 1, n_mels, time_frames)  ← GPU mel pipeline output
         # AST wants: (batch, time_frames, n_mels)
