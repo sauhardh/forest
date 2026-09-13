@@ -3,6 +3,12 @@ Audio Spectrogram Transformer (AST) Architecture.
 Adapts MIT's AudioSet-pretrained Vision Transformer for 3.0s PCEN bird sound spectrograms.
 """
 
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import re
 import torch
 import torch.nn as nn

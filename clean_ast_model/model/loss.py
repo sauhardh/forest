@@ -1,7 +1,12 @@
 """
 Class-Balanced Binary Cross-Entropy Loss with Soft Targets.
-Handles both hard integer labels, soft Mixup targets, and species frequency imbalance.
 """
+
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 import numpy as np
 import torch
@@ -25,7 +30,6 @@ class ClassBalancedBCELoss(nn.Module):
             counts = np.maximum(class_counts, 1)
             effective_num = 1.0 - np.power(beta, counts)
             weights = (1.0 - beta) / np.array(effective_num)
-            # Normalize so mean weight = 1.0, and clamp to avoid extreme gradients
             weights = weights / np.mean(weights)
             weights = np.clip(weights, 1.0, 25.0)
             pos_weight = torch.tensor(weights, dtype=torch.float32)

@@ -1,20 +1,22 @@
 """
-Evaluation Script for the AST Bird Classifier on Test or Validation Splits.
-Computes Loss, Clip-level Top-1/5, and Recording-level Top-1/5 using Temporal Mean Pooling.
+Execution: Benchmark Evaluation with Temporal Mean Pooling.
 """
 
+import sys
 from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 from collections import defaultdict
 import torch
-import torch.nn as nn
-import pandas as pd
 
-from config import NUM_CLASSES, BATCH_SIZE
-from features import TorchMelPCEN
-from dataset import build_dataloaders
-from model import ASTBirdClassifier
-from loss import ClassBalancedBCELoss
-from train import compute_metrics
+from config import BATCH_SIZE
+from features.mel_pcen import TorchMelPCEN
+from features.dataset import build_dataloaders
+from model.ast_transformer import ASTBirdClassifier
+from model.loss import ClassBalancedBCELoss
+from execution.train import compute_metrics
 
 
 def evaluate(
@@ -23,16 +25,12 @@ def evaluate(
     split: str = "test",
     pool_method: str = "mean",
 ):
-    """
-    Evaluates a trained model checkpoint on an entire dataset split.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading '{split}' dataset from: {clips_csv}")
     loaders = build_dataloaders(clips_csv=clips_csv, batch_size=BATCH_SIZE)
     loader = loaders[split]
     dataset = loader.dataset
 
-    # 1. Load Model & Weights
     model = ASTBirdClassifier(num_classes=dataset.num_classes, dropout=0.0, freeze_layers=0).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -77,7 +75,6 @@ def evaluate(
     clip_top1 = (total_top1 / n) * 100
     clip_top5 = (total_top5 / n) * 100
 
-    # ── Recording-Level Aggregation ─────────────────────────────────────────
     rec_top1_correct = 0
     rec_top5_correct = 0
     for rid, prob_list in rec_probs.items():
@@ -107,5 +104,4 @@ def evaluate(
 
 
 if __name__ == "__main__":
-    # Example: evaluate("checkpoints/best_model.pt", split="test")
     pass

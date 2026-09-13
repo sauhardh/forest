@@ -1,9 +1,13 @@
 """
-Dataset and DataLoader Pipeline with Acoustic Mixup.
-Reads clips_metadata.csv, serves 3.0s raw waveforms to GPU, and applies Mixup on mini-batches.
+PyTorch Dataset and Dataloaders with Acoustic Mixup Collator.
 """
 
+import sys
 from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import numpy as np
 import pandas as pd
 import soundfile as sf
@@ -11,7 +15,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 
 from config import (
-    SAMPLE_RATE,
     CLIP_SAMPLES,
     NUM_CLASSES,
     MIXUP_ALPHA,
@@ -36,20 +39,18 @@ class BirdAudioDataset(Dataset):
         df = pd.read_csv(csv_path)
         self.df = df[df["split"] == split].reset_index(drop=True)
 
-        # Build consistent alphabetical species-to-index mapping
         all_species = sorted(df["species"].unique())
         self.species_to_idx = {s: i for i, s in enumerate(all_species)}
         self.idx_to_species = {i: s for s, i in self.species_to_idx.items()}
         self.num_classes = len(all_species)
 
-        # Per-class count in training set (used for class-imbalance weighting in loss)
+        # Per-class count in training set (for class-imbalance loss weighting)
         self.class_counts = np.zeros(self.num_classes, dtype=np.int64)
         for species, grp in df[df["split"] == "train"].groupby("species"):
             idx = self.species_to_idx[species]
             self.class_counts[idx] = len(grp)
 
     def _load_and_pad(self, audio_path: str) -> np.ndarray:
-        """Reads audio file and standardizes length to exactly CLIP_SAMPLES (96,000)."""
         audio, _ = sf.read(audio_path, dtype="float32")
         if len(audio) < CLIP_SAMPLES:
             audio = np.pad(audio, (0, CLIP_SAMPLES - len(audio)))
@@ -90,11 +91,9 @@ class MixupCollator:
         labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
         recording_ids = [b["recording_id"] for b in batch]
 
-        # Convert to one-hot targets
         one_hot = torch.zeros(len(batch), self.num_classes, dtype=torch.float32)
         one_hot.scatter_(1, labels.unsqueeze(1), 1.0)
 
-        # Decide whether to apply mixup to this batch
         if np.random.rand() > self.prob:
             return {
                 "waveform": waveforms,
@@ -102,7 +101,6 @@ class MixupCollator:
                 "recording_id": recording_ids,
             }
 
-        # Random permutation for sample pairing
         perm = torch.randperm(len(batch))
         lam = float(np.random.beta(self.alpha, self.alpha))
 

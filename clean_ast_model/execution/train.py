@@ -1,12 +1,14 @@
 """
-Complete Training Pipeline for the AST Bird Sound Classifier.
-Implements the 2-Stage Training Recipe that reached 70.8% Recording Top-1 accuracy:
-  Stage 1: Transfer Warmup (8 layers frozen, LR = 5e-4, 15 epochs)
-  Stage 2: Full Fine-Tuning (All layers unfrozen, LR = 3e-5, 10 epochs)
+Execution: 2-Stage Training Loop for the AST Bird Sound Classifier.
 """
 
-import time
+import sys
 from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+import time
 from collections import defaultdict
 import torch
 import torch.nn as nn
@@ -19,16 +21,16 @@ from config import (
     STAGE1_FREEZE_LAYERS,
     STAGE1_EPOCHS,
     STAGE2_LR,
-    STAGE2_FREEZE_LAYERS,
     STAGE2_EPOCHS,
     STAGE2_DROPOUT,
     STAGE2_WEIGHT_DECAY,
     BATCH_SIZE,
 )
-from features import TorchMelPCEN, TorchSpecAugment
-from dataset import build_dataloaders
-from model import ASTBirdClassifier
-from loss import ClassBalancedBCELoss
+from features.mel_pcen import TorchMelPCEN
+from features.spec_augment import TorchSpecAugment
+from features.dataset import build_dataloaders
+from model.ast_transformer import ASTBirdClassifier
+from model.loss import ClassBalancedBCELoss
 
 
 def compute_metrics(logits: torch.Tensor, targets: torch.Tensor) -> tuple[float, float]:
@@ -52,28 +54,24 @@ def train_one_epoch(
     mel_transform: nn.Module,
     spec_augment: nn.Module,
 ) -> tuple[float, float]:
-    """Executes one training epoch with mixed precision."""
     model.train()
     total_loss = 0.0
     total_top1 = 0.0
     num_samples = len(loader.dataset)
 
-    for i, batch in enumerate(loader):
+    for batch in loader:
         waveforms = batch["waveform"].to(device, non_blocking=True)
         labels = batch["label"].to(device, non_blocking=True)
 
-        # 1. GPU Feature Pipeline: Waveform -> Mel-PCEN -> SpecAugment
         with torch.no_grad():
             specs = mel_transform(waveforms)
             specs = spec_augment(specs)
 
-        # 2. Forward pass with Automatic Mixed Precision (AMP)
         optimizer.zero_grad()
         with torch.amp.autocast(device_type="cuda", enabled=(device.type == "cuda")):
             logits = model(specs)
             loss = criterion(logits, labels)
 
-        # 3. Scaled backward pass
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -92,10 +90,6 @@ def validate(
     device: torch.device,
     mel_transform: nn.Module,
 ) -> tuple[float, float, float, float, float]:
-    """
-    Evaluates model on validation loader.
-    Computes both Clip-level and Recording-level (mean pooled) accuracy.
-    """
     model.eval()
     total_loss = 0.0
     total_top1 = 0.0
@@ -121,7 +115,6 @@ def validate(
             total_top1 += top1 * len(labels)
             total_top5 += top5 * len(labels)
 
-            # Group probabilities by original field recording
             rec_ids = batch["recording_id"]
             for idx, rid in enumerate(rec_ids):
                 target_idx = labels[idx].argmax().item() if labels[idx].ndim > 0 else labels[idx].item()
@@ -132,7 +125,6 @@ def validate(
     clip_top1 = total_top1 / max(num_samples, 1)
     clip_top5 = total_top5 / max(num_samples, 1)
 
-    # ── Recording-Level Aggregation (Mean Pooling) ──────────────────────────
     rec_top1_correct = 0
     rec_top5_correct = 0
     for rid, prob_list in rec_probs.items():
@@ -156,9 +148,6 @@ def run_training(
     save_dir: str = "checkpoints",
     resume_checkpoint: str | None = None,
 ):
-    """
-    Main training routine. Supports starting fresh or resuming Stage 2 fine-tuning.
-    """
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
@@ -166,16 +155,13 @@ def run_training(
     num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     print(f"🚀 Device: {device} " + (f"({num_gpus} GPUs DataParallel)" if num_gpus > 1 else ""))
 
-    # 1. Features & Augmentations
     mel_transform = TorchMelPCEN().to(device)
     spec_augment = TorchSpecAugment().to(device)
 
-    # 2. Dataloaders
     print(f"📂 Loading dataset from {clips_csv}...")
     loaders = build_dataloaders(clips_csv=clips_csv, batch_size=BATCH_SIZE)
     class_counts = loaders["train"].dataset.class_counts
 
-    # 3. Model & Loss
     model = ASTBirdClassifier(
         num_classes=NUM_CLASSES,
         dropout=STAGE2_DROPOUT,
@@ -190,7 +176,6 @@ def run_training(
 
     best_val_acc = 0.0
 
-    # 4. Resume logic for Stage 2 Fine-Tuning
     if resume_checkpoint is not None:
         print(f"\n🔄 Resuming for Stage 2 Full Fine-Tuning from: {resume_checkpoint}")
         ckpt = torch.load(resume_checkpoint, map_location=device, weights_only=False)
@@ -234,7 +219,6 @@ def run_training(
             f"Rec Top-1: {rec_top1*100:.1f}% (Rec Top-5: {rec_top5*100:.1f}%)"
         )
 
-        # Save checkpoint if recording-level Top-1 improves
         if rec_top1 > best_val_acc:
             best_val_acc = rec_top1
             checkpoint_file = save_path / "best_model.pt"
@@ -257,7 +241,4 @@ def run_training(
 
 
 if __name__ == "__main__":
-    # Example usage:
-    # To run Stage 1: run_training("outputs/extraction/clips_metadata.csv", "checkpoints")
-    # To run Stage 2: run_training("outputs/extraction/clips_metadata.csv", "checkpoints", resume_checkpoint="checkpoints/best_model.pt")
     run_training()

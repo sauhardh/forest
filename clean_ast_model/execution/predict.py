@@ -1,22 +1,24 @@
 """
-Single-File Audio Inference for Bird Sound Identification.
-Loads arbitrary WAV/MP3 recordings, segments into 3.0s windows, passes through AST,
-and performs Mean Pooling across windows to output Top-K species predictions.
+Execution: Single-File Audio Inference for Bird Sound Identification.
 """
 
+import sys
 from pathlib import Path
+_root = Path(__file__).resolve().parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import numpy as np
 import pandas as pd
 import torch
 import librosa
 
-from config import SAMPLE_RATE, CLIP_SAMPLES, NUM_CLASSES
-from features import TorchMelPCEN
-from model import ASTBirdClassifier
+from config import SAMPLE_RATE, CLIP_SAMPLES
+from features.mel_pcen import TorchMelPCEN
+from model.ast_transformer import ASTBirdClassifier
 
 
 def slice_windows(waveform: np.ndarray, window_size: int = CLIP_SAMPLES, hop_size: int = CLIP_SAMPLES // 2):
-    """Slices arbitrary-length audio into 3.0-second analysis windows."""
     total_len = len(waveform)
     if total_len <= window_size:
         padded = np.pad(waveform, (0, window_size - total_len))
@@ -41,17 +43,12 @@ def predict_bird(
     species_csv: str | Path = "outputs/extraction/clips_metadata.csv",
     top_k: int = 5,
 ) -> list[dict]:
-    """
-    Identifies bird species from any audio recording.
-    """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1. Load species alphabetical mapping
     df = pd.read_csv(species_csv)
     all_species = sorted(df["species"].unique())
     idx_to_species = {i: s for i, s in enumerate(all_species)}
 
-    # 2. Load Model & Checkpoint
     model = ASTBirdClassifier(num_classes=len(all_species), dropout=0.0, freeze_layers=0).to(device)
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -59,19 +56,16 @@ def predict_bird(
 
     mel_transform = TorchMelPCEN().to(device)
 
-    # 3. Load & slice audio
     waveform, _ = librosa.load(str(audio_path), sr=SAMPLE_RATE, mono=True)
     windows = slice_windows(waveform)
     window_tensor = torch.from_numpy(windows).to(device)
 
-    # 4. Inference across windows
     with torch.no_grad():
         with torch.amp.autocast(device_type="cuda", enabled=(device.type == "cuda")):
             specs = mel_transform(window_tensor)
             logits = model(specs)
-            probs = torch.sigmoid(logits)  # (Num_Windows, Num_Classes)
+            probs = torch.sigmoid(logits)
 
-    # 5. Temporal Mean Pooling across all windows in recording
     mean_probs = probs.mean(dim=0)
     top_scores, top_indices = mean_probs.topk(top_k)
 
@@ -93,5 +87,4 @@ def predict_bird(
 
 
 if __name__ == "__main__":
-    # Example: predict_bird("sample.wav", "checkpoints/best_model.pt")
     pass
