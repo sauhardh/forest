@@ -141,6 +141,20 @@ def predict_audio(
     model_num_classes = checkpoint.get("num_classes", num_classes)
     saved_epoch = checkpoint.get("epoch", "unknown")
 
+    if backbone is None or backbone == "auto":
+        backbone = checkpoint.get("backbone", None)
+        if backbone is None:
+            sd_keys = list(checkpoint["model_state_dict"].keys())
+            if any("ast" in k for k in sd_keys):
+                backbone = "ast"
+            elif any("features" in k for k in sd_keys):
+                backbone = "efficientnet_v2_s"
+            else:
+                backbone = "efficientnet_v2_s"
+        print(f"🤖 Auto-detected backbone: '{backbone}'")
+    else:
+        print(f"🤖 Backbone: '{backbone}'")
+
     model = build_model(name=backbone, num_classes=model_num_classes).to(device)
     # Migrate checkpoint keys if saved with an older version of transformers.
     from audio.model.backbone import ASTAudio
@@ -224,7 +238,7 @@ def main():
     parser = argparse.ArgumentParser(description="Classify any bird sound audio recording")
     parser.add_argument("--audio", type=str, required=True, help="Path to audio file (WAV, MP3, etc.)")
     parser.add_argument("--checkpoint", type=str, default=str(CHECKPOINTS_DIR / "best_model.pt"), help="Path to checkpoint")
-    parser.add_argument("--backbone", type=str, default="efficientnet_v2_s", help="Model backbone used for training (e.g., ast)")
+    parser.add_argument("--backbone", type=str, default=None, help="Model backbone used for training (e.g., ast). Auto-detected if omitted.")
     parser.add_argument("--clips-csv", type=str, default=str(CLIPS_METADATA_PATH), help="Clips metadata for species indexing")
     parser.add_argument("--top-k", type=int, default=5, help="Number of top predictions to display")
     parser.add_argument("--hop-sec", type=float, default=1.5, help="Stride between analysis windows in seconds")

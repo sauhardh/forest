@@ -26,23 +26,44 @@ def parse_args():
         "--checkpoint",
         type=str,
         default=str(CHECKPOINTS_DIR / "best_model.pt"),
-        help="Path to model checkpoint (.pt)",
+        help="Path to model checkpoint (.pt or .zip)",
     )
-    parser.add_argument("--split", type=str, default="val", choices=["val", "test", "train"])
+    parser.add_argument("--split", type=str, default="test", choices=["val", "test", "train"])
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--backbone", type=str, default="efficientnet_v2_s")
+    parser.add_argument(
+        "--backbone",
+        type=str,
+        default=None,
+        help="Backbone name (e.g. 'ast', 'efficientnet_v2_s'). "
+             "Auto-detected from checkpoint if omitted.",
+    )
     parser.add_argument("--clips-csv", type=str, default=str(CLIPS_METADATA_PATH))
     parser.add_argument("--cpu-features", action="store_true")
+    parser.add_argument(
+        "--pool-method",
+        type=str,
+        default="mean",
+        choices=["mean", "max"],
+        help="Pooling method for recording-level evaluation (default: mean)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=2,
+        help="DataLoader workers (default: 2)",
+    )
     return parser.parse_args()
 
 
 def evaluate_model(
     checkpoint_path: Path | str,
     clips_csv: Path | str = CLIPS_METADATA_PATH,
-    split: str = "val",
+    split: str = "test",
     batch_size: int = 16,
-    backbone: str = "efficientnet_v2_s",
+    backbone: str | None = None,
     cpu_features: bool = False,
+    pool_method: str = "mean",
+    num_workers: int = 2,
 ):
     ckpt_path = Path(checkpoint_path)
     if not ckpt_path.exists():
@@ -56,10 +77,32 @@ def evaluate_model(
     num_classes = checkpoint.get("num_classes", 286)
     saved_epoch = checkpoint.get("epoch", "unknown")
     saved_top1 = checkpoint.get("val_top1_acc", None)
+    saved_rec_top1 = checkpoint.get("rec_top1_acc", None)
+    saved_rec_top5 = checkpoint.get("rec_top5_acc", None)
+    # Auto-detect backbone if not explicitly provided
+    if backbone is None:
+        backbone = checkpoint.get("backbone", None)
+        if backbone is None:
+            # Guess from state dict key names
+            sd_keys = list(checkpoint["model_state_dict"].keys())
+            if any("ast" in k for k in sd_keys):
+                backbone = "ast"
+            elif any("features" in k for k in sd_keys):
+                backbone = "efficientnet_v2_s"
+            else:
+                backbone = "efficientnet_v2_s"
+        print(f"Auto-detected backbone: '{backbone}'")
+    else:
+        print(f"Backbone: '{backbone}'")
 
     print(f"Checkpoint was saved at Epoch {saved_epoch}")
     if saved_top1 is not None:
-        print(f"Recorded Checkpoint Val Top-1: {saved_top1 * 100:.2f}%")
+        print(f"Recorded Checkpoint Val Clip Top-1: {saved_top1 * 100:.2f}%")
+    if saved_rec_top1 is not None:
+        print(f"Recorded Checkpoint Val Rec  Top-1: {saved_rec_top1 * 100:.2f}%")
+    if saved_rec_top5 is not None:
+        print(f"Recorded Checkpoint Val Rec  Top-5: {saved_rec_top5 * 100:.2f}%")
+    print(f"Num classes: {num_classes}")
 
     # ── Feature transforms ──────────────────────────────────────────────────
     use_gpu_features = (device.type == "cuda") and (not cpu_features)
@@ -74,7 +117,7 @@ def evaluate_model(
     loaders = make_dataloaders(
         clips_csv=clips_csv,
         batch_size=batch_size,
-        num_workers=2,
+        num_workers=num_workers,
         use_mixup=False,
         return_waveform=use_gpu_features,
     )
@@ -145,9 +188,13 @@ def evaluate_model(
         rec_top1_correct = 0
         rec_top5_correct = 0
         for rec_id, prob_list in recording_probs.items():
-            mean_prob = torch.stack(prob_list).mean(dim=0)
+            stacked = torch.stack(prob_list)
+            if pool_method == "max":
+                pooled = stacked.max(dim=0).values
+            else:
+                pooled = stacked.mean(dim=0)
             target = recording_targets[rec_id]
-            _, top5 = mean_prob.topk(5)
+            _, top5 = pooled.topk(5)
             if top5[0].item() == target:
                 rec_top1_correct += 1
             if target in top5.tolist():
@@ -170,4 +217,6 @@ if __name__ == "__main__":
         batch_size=args.batch_size,
         backbone=args.backbone,
         cpu_features=args.cpu_features,
+        pool_method=args.pool_method,
+        num_workers=args.num_workers,
     )

@@ -130,37 +130,68 @@ class ASTAudio(nn.Module):
 
     @staticmethod
     def migrate_state_dict(state_dict: dict) -> dict:
-        """Remap checkpoint keys saved with old transformers (<4.36) to new names.
+        """Remap checkpoint keys between old and new transformers naming schemes.
 
         transformers ≥4.36 renamed the AST encoder internals:
           OLD: audio_spectrogram_transformer.encoder.layer.N.attention.attention.query
           NEW: audio_spectrogram_transformer.layers.N.attention.q_proj
 
-        This is a no-op if the checkpoint already uses the new naming scheme.
+        Automatically detects which scheme the checkpoint uses and remaps to
+        match the currently installed transformers version.
         """
         import re
+        from transformers import ASTForAudioClassification
 
-        # Detect whether this checkpoint uses the old naming scheme.
-        # Old checkpoints have 'encoder.layer' inside the AST path.
-        uses_old_scheme = any(
+        # Build a small dummy model to detect local key naming scheme
+        _dummy = ASTForAudioClassification.__new__(ASTForAudioClassification)
+        try:
+            from transformers import ASTConfig
+            _cfg = ASTConfig()
+            _dummy = ASTForAudioClassification(_cfg)
+            _local_keys = set(_dummy.state_dict().keys())
+        except Exception:
+            _local_keys = set()
+
+        local_uses_new = any("encoder.layers." in k or ".q_proj" in k for k in _local_keys) or \
+                         not any("encoder.layer." in k for k in _local_keys)
+
+        ckpt_uses_old = any(
             "audio_spectrogram_transformer.encoder.layer" in k
             for k in state_dict
         )
-        if not uses_old_scheme:
-            return state_dict  # Nothing to do.
+        ckpt_uses_new = any(
+            "audio_spectrogram_transformer.layers" in k
+            for k in state_dict
+        )
 
-        renames = {
-            # Structural
-            "audio_spectrogram_transformer.encoder.layer": "audio_spectrogram_transformer.layers",
-            # Attention projections
-            ".attention.attention.query": ".attention.q_proj",
-            ".attention.attention.key":   ".attention.k_proj",
-            ".attention.attention.value": ".attention.v_proj",
-            ".attention.output.dense":    ".attention.o_proj",
-            # FFN layers
-            ".intermediate.dense": ".mlp.fc1",
-            ".output.dense":       ".mlp.fc2",
-        }
+        # If schemes already match — nothing to do
+        if ckpt_uses_old == (not local_uses_new) or (not ckpt_uses_old and not ckpt_uses_new):
+            pass  # fall through to return original if no remapping needed
+
+        if ckpt_uses_old and local_uses_new:
+            # Old checkpoint → new local: forward migration
+            renames = {
+                "audio_spectrogram_transformer.encoder.layer": "audio_spectrogram_transformer.layers",
+                ".attention.attention.query": ".attention.q_proj",
+                ".attention.attention.key":   ".attention.k_proj",
+                ".attention.attention.value": ".attention.v_proj",
+                ".attention.output.dense":    ".attention.o_proj",
+                ".intermediate.dense": ".mlp.fc1",
+                ".output.dense":       ".mlp.fc2",
+            }
+        elif ckpt_uses_new and not local_uses_new:
+            # New checkpoint → old local: reverse migration
+            renames = {
+                "audio_spectrogram_transformer.layers": "audio_spectrogram_transformer.encoder.layer",
+                ".attention.q_proj": ".attention.attention.query",
+                ".attention.k_proj": ".attention.attention.key",
+                ".attention.v_proj": ".attention.attention.value",
+                ".attention.o_proj": ".attention.output.dense",
+                ".mlp.fc1": ".intermediate.dense",
+                ".mlp.fc2": ".output.dense",
+            }
+        else:
+            return state_dict  # Nothing to do
 
         new_dict = {}
         for k, v in state_dict.items():

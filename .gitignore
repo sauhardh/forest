@@ -11,3 +11,7 @@ wheels/
 outputs/
 .env
 data/
+kaggle_model/
+kaggle_upload.zip
+forest_.zip
+best_model.zip

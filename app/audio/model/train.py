@@ -280,6 +280,13 @@ def parse_args():
         help="For AST backbone: freeze the first N of 12 encoder layers (default: 8). "
              "Set 0 to fine-tune all layers. Ignored for EfficientNet backbones.",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to a checkpoint (.pt or .zip) to resume training from. "
+             "Restores model weights, optimizer state, scheduler state, and epoch counter.",
+    )
     return parser
 
 
@@ -312,9 +319,11 @@ def main(args=None):
     FREEZE_AST_LAYERS = getattr(args, "freeze_ast_layers", 8)
     SAVE_DIR = Path(args.save_dir) if args.save_dir else CHECKPOINTS_DIR
     CLIPS_CSV = Path(args.clips_csv) if args.clips_csv else CLIPS_METADATA_PATH
+    RESUME = Path(args.resume) if getattr(args, "resume", None) else None
 
     SAVE_DIR.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
 
@@ -341,6 +350,7 @@ def main(args=None):
 
     print(
         f"Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})"
+        + (f" × {num_gpus} GPUs" if num_gpus > 1 else "")
     )
     print(f"Checkpoints will be saved to: {SAVE_DIR.resolve()}")
     print(f"Clips metadata source: {CLIPS_CSV}")
@@ -383,6 +393,12 @@ def main(args=None):
         dropout=DROPOUT,
         freeze_layers=FREEZE_AST_LAYERS,
     ).to(device)
+
+    # ── Multi-GPU: wrap with DataParallel if multiple GPUs are available ───
+    if num_gpus > 1:
+        print(f"🚀 Multi-GPU Training: Wrapping model with DataParallel ({num_gpus} GPUs)")
+        model = nn.DataParallel(model)
+
     criterion = build_loss(loss_type="bce", class_counts=class_counts).to(device)
     # Only optimize trainable params — frozen layers don't need optimizer states,
     # which saves significant VRAM (Adam keeps 2 extra fp32 copies per param).
@@ -393,10 +409,59 @@ def main(args=None):
     best_val_acc = 0.0
     best_epoch = 0
     patience_counter = 0
+    start_epoch = 1
+
+    # ── Resume from checkpoint ─────────────────────────────────────────────
+    if RESUME is not None:
+        if not RESUME.exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {RESUME.resolve()}")
+        print(f"\n🔄 Resuming from checkpoint: {RESUME.resolve()}")
+        ckpt = torch.load(RESUME, map_location=device, weights_only=False)
+        # Unwrap DataParallel when loading state dict
+        raw_model = model.module if isinstance(model, nn.DataParallel) else model
+        from audio.model.backbone import ASTAudio
+        sd = ASTAudio.migrate_state_dict(ckpt["model_state_dict"])
+        raw_model.load_state_dict(sd)
+        if "optimizer_state_dict" in ckpt:
+            optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        if "patience_counter" in ckpt:
+            patience_counter = ckpt["patience_counter"]
+        if "best_val_acc" in ckpt:
+            best_val_acc = ckpt["best_val_acc"]
+        else:
+            best_val_acc = ckpt.get("rec_top1_acc", ckpt.get("val_top1_acc", 0.0))
+        # Reset patience counter for the new training stage
+        patience_counter = 0
+
+        # Resume from the epoch *after* the saved one
+        saved_epoch = ckpt.get("epoch", 0)
+        start_epoch = saved_epoch + 1
+
+        # If --epochs was specified as a small number (e.g. --epochs 10),
+        # treat it as "run 10 additional epochs" rather than stopping at epoch 10.
+        if EPOCHS <= saved_epoch:
+            target_epoch = saved_epoch + EPOCHS
+        else:
+            target_epoch = EPOCHS
+
+        # Re-initialize scheduler to decay over the actual epochs to run
+        num_epochs_to_run = max(target_epoch - start_epoch + 1, 1)
+        scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs_to_run, eta_min=1e-6)
+
+        print(
+            f"   Resumed at epoch {start_epoch} → Target: Epoch {target_epoch} "
+            f"({num_epochs_to_run} epochs to run) | Baseline {EVAL_METRIC}: {best_val_acc * 100:.2f}%\n"
+        )
+    else:
+        target_epoch = EPOCHS
 
     print("\nStarting Training...\n" + "─" * 60)
-    for epoch in range(1, EPOCHS + 1):
-        print("epochs:", epoch)
+    for epoch in range(start_epoch, target_epoch + 1):
+        print(f"Epoch: {epoch}/{target_epoch}")
         t0 = time.time()
         train_loss, train_top1, _ = train_epoch(
             model,
@@ -420,7 +485,7 @@ def main(args=None):
         scheduler.step()
         elapsed = time.time() - t0
         print(
-            f"Epoch [{epoch:02d}/{EPOCHS}] ({elapsed:.1f}s) | "
+            f"Epoch [{epoch:02d}/{target_epoch}] ({elapsed:.1f}s) | "
             f"Train Loss: {train_loss:.4f} | Train Acc: {train_top1 * 100:.1f}% | "
             f"Val Loss: {val_loss:.4f} | Clip Top-1: {clip_top1 * 100:.1f}% | "
             f"Rec Top-1: {rec_top1 * 100:.1f}% (Rec Top-5: {rec_top5 * 100:.1f}%)"
@@ -434,15 +499,23 @@ def main(args=None):
             best_epoch = epoch
             patience_counter = 0
             checkpoint_path = SAVE_DIR / "best_model.pt"
+            # Unwrap DataParallel before saving so the checkpoint is portable
+            raw_model = model.module if isinstance(model, nn.DataParallel) else model
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": raw_model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
                     "val_top1_acc": clip_top1,
                     "val_top5_acc": clip_top5,
                     "rec_top1_acc": rec_top1,
                     "rec_top5_acc": rec_top5,
+                    "best_val_acc": best_val_acc,
+                    "patience_counter": patience_counter,
                     "num_classes": num_classes,
+                    "backbone": BACKBONE,
                 },
                 checkpoint_path,
             )
