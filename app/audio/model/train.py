@@ -419,14 +419,27 @@ def main(args=None):
     # ── Resume from checkpoint ─────────────────────────────────────────────
     if RESUME is not None:
         if RESUME.is_dir():
-            for cand in ["best_model.pt", "best_model.zip", "last_checkpoint.pt", "model.pt"]:
-                if (RESUME / cand).exists():
-                    RESUME = RESUME / cand
-                    break
+            # Check if this directory is an unzipped PyTorch checkpoint (Kaggle auto-unpacks zip datasets)
+            if (RESUME / "data.pkl").exists() or (RESUME / "version").exists() or (RESUME / "data").exists():
+                import shutil, tempfile
+                repacked = Path(tempfile.gettempdir()) / "best_model_repacked.zip"
+                print(f"📦 Detected unzipped PyTorch checkpoint folder. Repacking to {repacked}...")
+                shutil.make_archive(
+                    str(repacked).replace(".zip", ""),
+                    "zip",
+                    root_dir=RESUME.parent,
+                    base_dir=RESUME.name,
+                )
+                RESUME = repacked
             else:
-                files = [f for f in RESUME.iterdir() if f.suffix.lower() in (".pt", ".zip", ".pth")]
-                if files:
-                    RESUME = files[0]
+                for cand in ["best_model.pt", "best_model.zip", "last_checkpoint.pt", "model.pt"]:
+                    if (RESUME / cand).exists():
+                        RESUME = RESUME / cand
+                        break
+                else:
+                    files = [f for f in RESUME.iterdir() if f.suffix.lower() in (".pt", ".zip", ".pth")]
+                    if files:
+                        RESUME = files[0]
 
         if not RESUME.exists() or RESUME.is_dir():
             raise FileNotFoundError(f"Resume checkpoint file not found: {RESUME.resolve()}")
