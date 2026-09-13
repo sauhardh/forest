@@ -317,7 +317,12 @@ def main(args=None):
     EVAL_METRIC = getattr(args, "eval_metric", "rec_top1")
     GRAD_ACCUM = getattr(args, "grad_accum", 1)
     FREEZE_AST_LAYERS = getattr(args, "freeze_ast_layers", 8)
-    SAVE_DIR = Path(args.save_dir) if args.save_dir else CHECKPOINTS_DIR
+    if args.save_dir:
+        SAVE_DIR = Path(args.save_dir)
+    elif "/kaggle/input" in str(CHECKPOINTS_DIR):
+        SAVE_DIR = Path("/kaggle/working/checkpoints")
+    else:
+        SAVE_DIR = CHECKPOINTS_DIR
     CLIPS_CSV = Path(args.clips_csv) if args.clips_csv else CLIPS_METADATA_PATH
     RESUME = Path(args.resume) if getattr(args, "resume", None) else None
 
