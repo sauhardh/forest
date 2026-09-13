@@ -418,8 +418,18 @@ def main(args=None):
 
     # ── Resume from checkpoint ─────────────────────────────────────────────
     if RESUME is not None:
-        if not RESUME.exists():
-            raise FileNotFoundError(f"Resume checkpoint not found: {RESUME.resolve()}")
+        if RESUME.is_dir():
+            for cand in ["best_model.pt", "best_model.zip", "last_checkpoint.pt", "model.pt"]:
+                if (RESUME / cand).exists():
+                    RESUME = RESUME / cand
+                    break
+            else:
+                files = [f for f in RESUME.iterdir() if f.suffix.lower() in (".pt", ".zip", ".pth")]
+                if files:
+                    RESUME = files[0]
+
+        if not RESUME.exists() or RESUME.is_dir():
+            raise FileNotFoundError(f"Resume checkpoint file not found: {RESUME.resolve()}")
         print(f"\n🔄 Resuming from checkpoint: {RESUME.resolve()}")
         ckpt = torch.load(RESUME, map_location=device, weights_only=False)
         # Unwrap DataParallel when loading state dict
